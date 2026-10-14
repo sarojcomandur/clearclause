@@ -6,9 +6,12 @@ Not legal advice. An AI reading aid that can miss things or get them wrong.
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -18,22 +21,38 @@ from pypdf import PdfReader
 
 APP_NAME = "ClearClause"
 MAX_CHARS = 60_000
-# Groq's free on_demand tier is often 8,000 tokens/minute per model.
-# Keep each live request well under that, including the system prompt.
+# Public mode reads less, so one visitor cannot burn a large share of the budget.
+PUBLIC_MAX_CHARS = 45_000
+# Groq's FREE on_demand tier is often 8,000 tokens/minute per model.
+# Only used when GROQ_FREE_TIER = "1" in secrets. Paid keys read in one go.
 GROQ_CHUNK_CHARS = 14_000
+
+DISCLAIMER = (
+    "ClearClause is a reading aid, not a lawyer, not a law firm, and not legal advice. "
+    "It can miss clauses, misread text, and get things wrong. "
+    "For a real decision, have a licensed lawyer review the full document."
+)
+BEST_FIT_NOTE = "Works best on 6–15 pages of selectable text (not scanned photos)."
 
 PROVIDERS = {
     "groq": {
-        "label": "Groq (best free starter)",
+        "label": "Groq",
         "base_url": "https://api.groq.com/openai/v1",
         "model": "openai/gpt-oss-120b",
         "key_help": "https://console.groq.com/keys",
     },
     "gemini": {
-        "label": "Google Gemini (free tier)",
+        "label": "Google Gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "model": "gemini-2.5-flash",
         "key_help": "https://aistudio.google.com/apikey",
+    },
+    "anthropic": {
+        "label": "Anthropic Claude",
+        # Anthropic's OpenAI-compatible endpoint, so the same client code works.
+        "base_url": "https://api.anthropic.com/v1/",
+        "model": "claude-haiku-4-5",
+        "key_help": "https://console.anthropic.com/settings/keys",
     },
     "xai": {
         "label": "xAI Grok",
@@ -102,6 +121,16 @@ Return ONLY valid JSON with this exact shape:
   "questions_before_signing": ["string"],
   "limits": "One short note on what this reading might have missed."
 }
+
+Always check these, whatever the paper type, and flag them when present:
+- Who owns work, ideas, or IP — especially "whether or not related" or outside working hours (flag high).
+- Auto-renewal and the notice window needed to stop it (flag; people miss these deadlines).
+- Notice periods that are different for each side (say both numbers in the flag title).
+- Who picks the arbitrator or judge. If one side appoints a sole arbitrator alone, flag it high
+  as well as any far-away venue.
+- One side can change the terms alone (by email, posting, or "continued use" = acceptance): flag high.
+- Non-solicit / non-hire / non-compete limits after the paper ends.
+- Penalties or fees for leaving early.
 
 Rules:
 - Prefer fewer, sharper flags over a long laundry list.
@@ -384,10 +413,35 @@ def load_secret(name: str) -> str:
     return ""
 
 
+def secret_flag(name: str) -> bool:
+    return load_secret(name).lower() in {"1", "true", "yes", "on"}
+
+
+def secret_int(name: str, default: int) -> int:
+    try:
+        return int(load_secret(name) or default)
+    except ValueError:
+        return default
+
+
+def is_public_mode() -> bool:
+    return secret_flag("PUBLIC_MODE")
+
+
 def get_settings() -> dict[str, str]:
     default_provider = load_secret("API_PROVIDER") or "groq"
     if default_provider not in PROVIDERS:
         default_provider = "groq"
+
+    saved_key = load_secret("API_KEY")
+    # When the owner has saved a key in Secrets, visitors never see the AI setup.
+    # Set SHOW_SETTINGS = "1" only for your own comparison sessions.
+    if saved_key and not secret_flag("SHOW_SETTINGS"):
+        return {
+            "provider": default_provider,
+            "api_key": saved_key,
+            "model": load_secret("MODEL") or PROVIDERS[default_provider]["model"],
+        }
 
     st.sidebar.header("AI setup")
     st.sidebar.caption(
@@ -400,7 +454,6 @@ def get_settings() -> dict[str, str]:
         index=list(PROVIDERS.keys()).index(default_provider),
         format_func=lambda key: PROVIDERS[key]["label"],
     )
-    saved_key = load_secret("API_KEY")
     if saved_key:
         st.sidebar.success("API key loaded from secrets.toml (or environment).")
     key = st.sidebar.text_input(
@@ -415,7 +468,7 @@ def get_settings() -> dict[str, str]:
         value=load_secret("MODEL") or PROVIDERS[provider]["model"],
     )
     st.sidebar.markdown(f"Get a key: {PROVIDERS[provider]['key_help']}")
-    if provider == "groq":
+    if provider == "groq" and secret_flag("GROQ_FREE_TIER"):
         st.sidebar.caption(
             "Groq free plan: about 8,000 tokens per minute. "
             "Long PDFs are split into parts automatically. "
@@ -438,7 +491,7 @@ def parse_hide_words(raw: str) -> list[str]:
 
 
 def mask_identifiers(text: str, extra_terms: list[str] | None = None) -> tuple[str, dict[str, int]]:
-    """Replace common IDs locally. Nothing is sent during this step."""
+    """Replace common IDs on the ClearClause server. Nothing goes to the AI provider during this step."""
     counts: dict[str, int] = {}
     out = text
 
@@ -449,10 +502,16 @@ def mask_identifiers(text: str, extra_terms: list[str] | None = None) -> tuple[s
             counts[label] = counts.get(label, 0) + n
 
     apply("EMAIL", r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
-    apply("PHONE", r"(?:\+91[\s-]*)?[6-9]\d{9}\b")
-    apply("PHONE", r"\b0\d{2,4}[\s-]\d{6,8}\b")
-    apply("AADHAAR", r"\b\d{4}\s\d{4}\s\d{4}\b")
-    apply("PAN", r"\b[A-Z]{5}\d{4}[A-Z]\b")
+    # Aadhaar first, so its 4-4-4 groups are not half-eaten by the phone rules.
+    apply("AADHAAR", r"(?<!\d)\d{4}[\s-]\d{4}[\s-]\d{4}(?!\d)")
+    # Indian mobiles: 9845147258, 98451 47258, 98451-47258, 984 514 7258, with or without +91 / 0.
+    apply("PHONE", r"(?<![\d+])(?:\+?91[\s-]*|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)")
+    apply("PHONE", r"(?<![\d+])(?:\+?91[\s-]*|0)?[6-9]\d{2}[\s-]\d{3}[\s-]\d{4}(?!\d)")
+    # Landlines like 080 2345 6789 or 080-23456789.
+    apply("PHONE", r"(?<!\d)0\d{2,4}[\s-]\d{3,4}[\s-]?\d{3,4}(?!\d)")
+    # Other international numbers, e.g. +1 415 555 0134, +44 20 7946 0958.
+    apply("PHONE", r"\+\d{1,3}[\s-]?\(?\d{1,4}\)?(?:[\s-]?\d{2,4}){2,4}(?!\d)")
+    apply("PAN", r"\b[A-Z]{5}\d{4}[A-Z]\b", re.I)
     apply("GSTIN", r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b")
     apply("IFSC", r"\b[A-Z]{4}0[A-Z0-9]{6}\b")
     apply("CIN", r"\b[UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b")
@@ -472,7 +531,7 @@ def format_mask_counts(counts: dict[str, int]) -> str:
     order = ["EMAIL", "PHONE", "AADHAAR", "PAN", "GSTIN", "IFSC", "CIN", "ACCOUNT", "HIDDEN"]
     bits = [f"{counts[key]} {key.lower()}" for key in order if key in counts]
     extra = [f"{label} × {n}" for label, n in counts.items() if label not in order]
-    return "Masked on this Mac: " + ", ".join(bits + extra) + "."
+    return "Masked before sending: " + ", ".join(bits + extra) + "."
 
 
 def extract_pdf_text(uploaded) -> str:
@@ -563,7 +622,7 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             if person not in parties:
                 parties.append(person)
 
-    limits = " Read in parts because the provider cap is small."
+    limits = " Read in parts because the paper was long."
     extra = " ".join(str(r.get("limits") or "") for r in reports).strip()
     if extra:
         limits = extra + limits
@@ -592,15 +651,15 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
 def explain_ai_error(exc: Exception) -> str:
     text = str(exc)
     low = text.lower()
-    if "413" in text or "tokens per minute" in low or "rate_limit" in low:
+    if "413" in text or "429" in text or "tokens per minute" in low or "rate_limit" in low or "rate limit" in low:
         return (
-            "The contract is larger than this Groq free-plan limit "
-            "(about 8,000 tokens per minute). Wait 60 seconds and click Simplify again — "
-            "the app now splits long papers into parts. "
-            "Or paste 6–8 pages at a time. "
-            "Gemini’s free key usually accepts a longer paper in one go."
+            "ClearClause is busy right now (the AI provider's rate limit was reached). "
+            "Wait a minute and click Simplify again, or paste fewer pages. "
+            + BEST_FIT_NOTE
         )
     if "401" in text or "invalid_api_key" in low or "incorrect api key" in low:
+        if is_public_mode():
+            return "ClearClause is temporarily unavailable. Please try again later."
         return "The API key was rejected. Copy a fresh key from the provider dashboard and paste it again."
     if "model" in low and ("not found" in low or "does not exist" in low):
         return "That model name is not available on this key. Leave the default, or pick another model the provider lists."
@@ -610,6 +669,9 @@ def explain_ai_error(exc: Exception) -> str:
             "Wait 60 seconds and click Simplify again. "
             "If it keeps failing, paste fewer pages."
         )
+    if is_public_mode():
+        # Do not show raw provider errors (they can include account details) to strangers.
+        return "The AI call failed. Please try again in a minute."
     return f"The AI call failed. Technical detail: {exc}"
 
 
@@ -650,11 +712,12 @@ def analyze_contract(
         api_key=settings["api_key"],
         base_url=PROVIDERS[settings["provider"]]["base_url"],
     )
-    chunk_size = GROQ_CHUNK_CHARS if settings["provider"] == "groq" else MAX_CHARS
+    groq_free = settings["provider"] == "groq" and secret_flag("GROQ_FREE_TIER")
+    chunk_size = GROQ_CHUNK_CHARS if groq_free else secret_int("CHUNK_CHARS", MAX_CHARS)
     chunks = chunk_text(contract_text, chunk_size)
     reports: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, start=1):
-        if index > 1 and settings["provider"] == "groq":
+        if index > 1 and groq_free:
             st.info(f"Waiting 20 seconds so Groq’s per-minute cap can reset. Part {index} of {len(chunks)}…")
             time.sleep(20)
         if len(chunks) > 1:
@@ -807,15 +870,110 @@ def render_report(data: dict[str, Any], source_label: str) -> None:
     if limits:
         st.info(limits)
 
-    st.warning(
-        "ClearClause is a reading aid, not a lawyer, not a law firm, and not legal advice. "
-        "It can miss clauses, misread scanned text, and invent emphasis. "
-        "For a real decision, have a licensed lawyer review the full document."
+    st.warning(DISCLAIMER)
+
+
+# ---------------------------------------------------------------------------
+# Usage limits (protect the API key and budget)
+# ---------------------------------------------------------------------------
+# Counts live in server memory. They reset at midnight (India time) and if the
+# app restarts, so ALSO set a monthly spend limit in the AI provider's console.
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+
+@st.cache_resource
+def usage_store() -> dict[str, Any]:
+    return {"lock": threading.Lock(), "day": "", "total": 0, "by_user": {}}
+
+
+def visitor_ids() -> list[str]:
+    """Hashed IDs used only for daily limits: the email given at the gate, and the IP if Streamlit exposes it."""
+    ids: list[str] = []
+    email = st.session_state.get("gate_email", "")
+    if email:
+        ids.append("e:" + hashlib.sha256(email.lower().encode()).hexdigest()[:16])
+    ip = ""
+    try:
+        ip = getattr(st.context, "ip_address", None) or ""
+        if not ip:
+            fwd = (st.context.headers or {}).get("X-Forwarded-For", "")
+            ip = fwd.split(",")[0].strip()
+    except Exception:
+        ip = ""
+    if ip:
+        ids.append("i:" + hashlib.sha256(ip.encode()).hexdigest()[:16])
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+    ids.append("s:" + st.session_state.session_id)
+    return ids
+
+
+def take_usage_slot() -> str:
+    """Return "" if this visitor may run one more analysis now, else a friendly reason."""
+    total_cap = secret_int("DAILY_LIMIT_TOTAL", 100 if is_public_mode() else 0)
+    per_user_cap = secret_int("DAILY_LIMIT_PER_USER", 3 if is_public_mode() else 0)
+    if not total_cap and not per_user_cap:
+        return ""
+    store = usage_store()
+    today = dt.datetime.now(IST).strftime("%Y-%m-%d")
+    ids = visitor_ids()
+    with store["lock"]:
+        if store["day"] != today:
+            store.update(day=today, total=0, by_user={})
+        if total_cap and store["total"] >= total_cap:
+            return (
+                "Today's free ClearClause readings are used up. Please come back tomorrow, "
+                "or write to saroj@mastqual.in for a walkthrough."
+            )
+        if per_user_cap and any(store["by_user"].get(i, 0) >= per_user_cap for i in ids):
+            return (
+                f"You have used today's {per_user_cap} free readings. Please come back tomorrow."
+            )
+        store["total"] += 1
+        for i in ids:
+            store["by_user"][i] = store["by_user"].get(i, 0) + 1
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Access gates
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.I)
+
+
+def public_gate() -> bool:
+    """Light gate for public visitors: an email and a not-legal-advice acknowledgement."""
+    if st.session_state.get("gate_email"):
+        return True
+    st.title("ClearClause")
+    st.markdown("A first read of a contract, in plain English. Built by Mastqual.")
+    st.warning(DISCLAIMER)
+    st.caption(
+        "Your email is used only to apply a small daily limit so the free demo stays up. "
+        "It is not sent to the AI and is not kept after the app restarts. "
+        + BEST_FIT_NOTE
     )
+    with st.form("gate"):
+        email = st.text_input("Your email")
+        agree = st.checkbox("I understand ClearClause is not a lawyer and this is not legal advice.")
+        go = st.form_submit_button("Start", type="primary")
+    if go:
+        if not EMAIL_RE.match(email.strip()):
+            st.error("Please enter a valid email address.")
+        elif not agree:
+            st.error("Please tick the box to continue.")
+        else:
+            st.session_state.gate_email = email.strip()
+            st.rerun()
+    return False
 
 
 def require_access() -> bool:
-    """Lock the app when ACCESS_PASSWORD is set in secrets. Local use without it stays open."""
+    """Public mode: email gate. Otherwise: lock with ACCESS_PASSWORD when set (private testers)."""
+    if is_public_mode():
+        return public_gate()
     expected = load_secret("ACCESS_PASSWORD")
     if not expected:
         return True
@@ -858,7 +1016,13 @@ def main() -> None:
         "Paste a contract or upload a PDF. Get a **plain-English read**, "
         "plus the **vague phrases** and **pitfalls** a non-lawyer should notice."
     )
-    st.caption("Not legal advice. Do not rely on this instead of a lawyer.")
+    st.warning("**Not a lawyer. Not legal advice.** " + DISCLAIMER.split(". ", 1)[1])
+    st.caption(
+        "Privacy: the text in the preview below is sent to an AI provider "
+        f"({PROVIDERS[settings['provider']]['label']}) to write your briefing. "
+        "ClearClause does not store your contract — there are no accounts and no history. "
+        + BEST_FIT_NOTE
+    )
 
     if "contract_text" not in st.session_state:
         st.session_state.contract_text = ""
@@ -917,7 +1081,7 @@ def main() -> None:
         if pasted != st.session_state.contract_text:
             st.session_state.contract_text = pasted
     with tab_pdf:
-        uploaded = st.file_uploader("PDF only for version 1", type=["pdf"])
+        uploaded = st.file_uploader("PDF with selectable text (6–15 pages works best)", type=["pdf"])
         if uploaded is not None:
             try:
                 extracted = extract_pdf_text(uploaded)
@@ -937,9 +1101,10 @@ def main() -> None:
 
     st.subheader("Before anything is sent")
     st.caption(
-        "Masking runs on this computer. The preview below is the exact text that will "
-        "go to the AI provider if you click Simplify. Masking is imperfect — unique "
-        "facts can still identify someone."
+        "Masking runs on the ClearClause server before anything goes to the AI provider. "
+        "The preview below is the exact text that will be sent if you click Simplify. "
+        "Masking is imperfect — names, addresses, and unique facts can still identify someone, "
+        "so add them to the box below."
     )
     mask_on = st.checkbox(
         "Mask IDs and contacts before sending",
@@ -992,20 +1157,25 @@ def main() -> None:
         st.session_state.report_source = "Demo report — sample Bengaluru leave-and-licence. No API key used."
         st.rerun()
 
+    max_chars = PUBLIC_MAX_CHARS if is_public_mode() else MAX_CHARS
     if run:
         text = (outbound_text or "").strip()
+        limit_reason = ""
         if not raw_text:
             st.error("Paste text or upload a PDF first. Or click the sample button to see how a report looks.")
-        elif len(text) > MAX_CHARS:
+        elif len(text) > max_chars:
             st.error(
-                f"This text is {len(text):,} characters. Version 1 reads up to "
-                f"{MAX_CHARS:,} characters (about 15–25 pages). Paste the key sections for now."
+                f"This text is {len(text):,} characters. ClearClause reads up to "
+                f"{max_chars:,} characters (about 15 pages). Paste the key sections for now. "
+                + BEST_FIT_NOTE
             )
         elif not settings["api_key"]:
             st.error(
                 "Live analysis needs an API key. Use **Load a sample rental agreement** "
-                "right now, then add a Groq key in the sidebar to analyse your own paper."
+                "right now, or add a key in the sidebar to analyse your own paper."
             )
+        elif limit_reason := take_usage_slot():
+            st.warning(limit_reason)
         else:
             with st.spinner("Reading the fine print…"):
                 try:
@@ -1016,10 +1186,10 @@ def main() -> None:
                     st.error(explain_ai_error(exc))
                 else:
                     st.session_state.report = report
-                    masked_note = " · IDs masked on this Mac" if mask_on else " · sent unmasked"
+                    masked_note = " · IDs masked before sending" if mask_on else " · sent unmasked"
                     st.session_state.report_source = (
                         f"Live analysis · {PROVIDERS[settings['provider']]['label']} · "
-                        f"{settings['model']}{masked_note}"
+                        f"{settings['model']}{masked_note} · not legal advice"
                     )
 
     if st.session_state.report:

@@ -44,7 +44,7 @@ PROVIDERS = {
     "gemini": {
         "label": "Google Gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",
         "key_help": "https://aistudio.google.com/apikey",
     },
     "anthropic": {
@@ -135,6 +135,8 @@ Always check these, whatever the paper type, and flag them when present:
 Rules:
 - Prefer fewer, sharper flags over a long laundry list.
 - Quote only short snippets.
+- Keep the whole JSON compact (under about 1,500 words). Each string is one or two short sentences.
+  At most 8 red_flags, 5 ambiguous_terms, 5 missing_protections, 8 questions.
 - If the text is incomplete, say so in limits and lower your certainty in the verdict why.
 - If it does not look like a contract, say that and still extract what you can.
 - If a playbook is attached, check every playbook item against the text. Flag hits. List misses under missing_protections.
@@ -657,11 +659,23 @@ def explain_ai_error(exc: Exception) -> str:
             "Wait a minute and click Simplify again, or paste fewer pages. "
             + BEST_FIT_NOTE
         )
+    if (
+        "503" in text or "529" in text or "overloaded" in low or "high demand" in low
+        or "unavailable" in low or "timed out" in low or "timeout" in low
+    ):
+        return (
+            "The AI provider is busy right now and did not answer in time. "
+            "Please wait a minute and click Simplify again."
+        )
     if "401" in text or "invalid_api_key" in low or "incorrect api key" in low:
         if is_public_mode():
             return "ClearClause is temporarily unavailable. Please try again later."
         return "The API key was rejected. Copy a fresh key from the provider dashboard and paste it again."
-    if "model" in low and ("not found" in low or "does not exist" in low):
+    if "model" in low and (
+        "not found" in low or "not_found" in low or "does not exist" in low or "no longer available" in low
+    ):
+        if is_public_mode():
+            return "ClearClause is temporarily unavailable. Please try again later."
         return "That model name is not available on this key. Leave the default, or pick another model the provider lists."
     if "expecting" in low or "delimiter" in low or "json" in low:
         return (
@@ -682,7 +696,7 @@ def call_model(client: OpenAI, settings: dict[str, str], user_prompt: str) -> di
             response = client.chat.completions.create(
                 model=settings["model"],
                 temperature=0.1 if attempt else 0.2,
-                max_tokens=4000,
+                max_tokens=secret_int("MAX_OUTPUT_TOKENS", 8000),
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
@@ -711,6 +725,9 @@ def analyze_contract(
     client = OpenAI(
         api_key=settings["api_key"],
         base_url=PROVIDERS[settings["provider"]]["base_url"],
+        # Stop waiting on a stuck provider, so visitors get a clear message instead of a spinner.
+        timeout=float(secret_int("AI_TIMEOUT_SECONDS", 90)),
+        max_retries=1,
     )
     groq_free = settings["provider"] == "groq" and secret_flag("GROQ_FREE_TIER")
     chunk_size = GROQ_CHUNK_CHARS if groq_free else secret_int("CHUNK_CHARS", MAX_CHARS)

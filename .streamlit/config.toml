@@ -1,0 +1,8 @@
+[client]
+# Hide the developer menu items for visitors.
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[server]
+# Reject very large uploads (PDFs over 10 MB are rarely 6-15 pages of text).
+maxUploadSize = 10

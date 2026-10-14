@@ -144,7 +144,8 @@ Rules:
 - Prefer fewer, sharper flags over a long laundry list.
 - Quote only short snippets.
 - Keep the whole JSON compact (under about 1,500 words). Each string is one or two short sentences.
-  At most 8 red_flags, 5 ambiguous_terms, 5 missing_protections, 8 questions.
+  At most 12 red_flags (checklist items above come first, then anything else), 5 ambiguous_terms,
+  5 missing_protections, 10 questions.
 - If the text is incomplete, say so in limits and lower your certainty in the verdict why.
 - If it does not look like a contract, say that and still extract what you can.
 - If a playbook is attached, check every playbook item against the text. Flag hits. List misses under missing_protections.

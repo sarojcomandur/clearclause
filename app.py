@@ -122,15 +122,23 @@ Return ONLY valid JSON with this exact shape:
   "limits": "One short note on what this reading might have missed."
 }
 
-Always check these, whatever the paper type, and flag them when present:
-- Who owns work, ideas, or IP — especially "whether or not related" or outside working hours (flag high).
-- Auto-renewal and the notice window needed to stop it (flag; people miss these deadlines).
+Always check these, whatever the paper type. Each one that is present MUST get its own entry
+in red_flags (not only a mention in the summary or dates):
+- Who owns work, ideas, or IP — especially "whether or not related" or outside working hours (high).
+- Auto-renewal and the notice window needed to stop it (medium or higher; people miss these deadlines).
 - Notice periods that are different for each side (say both numbers in the flag title).
-- Who picks the arbitrator or judge. If one side appoints a sole arbitrator alone, flag it high
-  as well as any far-away venue.
-- One side can change the terms alone (by email, posting, or "continued use" = acceptance): flag high.
-- Non-solicit / non-hire / non-compete limits after the paper ends.
+- Who picks the arbitrator or judge. If one side appoints a sole arbitrator alone, flag it high,
+  together with any far-away venue.
+- One side can change the terms alone (by email, posting, or "continued use" = acceptance): high.
+- Lopsided liability: one side's liability is capped while the other's indemnity is unlimited
+  (one flag that names both sides).
+- Non-solicit / non-hire / non-compete limits after the paper ends (name each one that appears).
 - Penalties or fees for leaving early.
+
+Accuracy rules:
+- Describe each clause exactly as written. Do not widen it (for example, "leaves" is not "is fired").
+- Never mention a clause, right, or obligation that is not in the text. If something is absent,
+  put it only under missing_protections and say it is missing.
 
 Rules:
 - Prefer fewer, sharper flags over a long laundry list.
@@ -1194,7 +1202,7 @@ def main() -> None:
         elif limit_reason := take_usage_slot():
             st.warning(limit_reason)
         else:
-            with st.spinner("Reading the fine print…"):
+            with st.spinner("Reading the fine print… this usually takes under a minute."):
                 try:
                     report = analyze_contract(
                         text, doc_type, jurisdiction, reader_role, settings

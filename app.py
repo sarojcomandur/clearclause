@@ -800,7 +800,8 @@ def render_report(data: dict[str, Any], source_label: str) -> None:
 
     st.markdown(
         f"""
-        <div style="border:1px solid {color}33;background:{color}0d;
+        <div style="border:1px solid {color}55;border-left:6px solid {color};
+        background:linear-gradient({color}14,{color}14),#ffffff;
         border-radius:16px;padding:18px 20px;margin:8px 0 18px;">
           <div style="font-size:0.8rem;color:{color};font-weight:700;
           text-transform:uppercase;letter-spacing:0.06em;">{title}</div>

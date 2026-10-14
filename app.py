@@ -1,5 +1,5 @@
 """
-ClearClause — plain-English contract reader for non-lawyers.
+Mastqual Contract Reader (formerly ClearClause) — plain-English contract reader for non-lawyers.
 
 Not legal advice. An AI reading aid that can miss things or get them wrong.
 """
@@ -19,7 +19,7 @@ import streamlit as st
 from openai import OpenAI
 from pypdf import PdfReader
 
-APP_NAME = "ClearClause"
+APP_NAME = "Mastqual Contract Reader"
 MAX_CHARS = 60_000
 # Public mode reads less, so one visitor cannot burn a large share of the budget.
 PUBLIC_MAX_CHARS = 45_000
@@ -28,7 +28,7 @@ PUBLIC_MAX_CHARS = 45_000
 GROQ_CHUNK_CHARS = 14_000
 
 DISCLAIMER = (
-    "ClearClause is a reading aid, not a lawyer, not a law firm, and not legal advice. "
+    "Mastqual Contract Reader is a reading aid, not a lawyer, not a law firm, and not legal advice. "
     "It can miss clauses, misread text, and get things wrong. "
     "For a real decision, have a licensed lawyer review the full document."
 )
@@ -502,7 +502,7 @@ def parse_hide_words(raw: str) -> list[str]:
 
 
 def mask_identifiers(text: str, extra_terms: list[str] | None = None) -> tuple[str, dict[str, int]]:
-    """Replace common IDs on the ClearClause server. Nothing goes to the AI provider during this step."""
+    """Replace common IDs on the Mastqual Contract Reader server. Nothing goes to the AI provider during this step."""
     counts: dict[str, int] = {}
     out = text
 
@@ -664,7 +664,7 @@ def explain_ai_error(exc: Exception) -> str:
     low = text.lower()
     if "413" in text or "429" in text or "tokens per minute" in low or "rate_limit" in low or "rate limit" in low:
         return (
-            "ClearClause is busy right now (the AI provider's rate limit was reached). "
+            "Mastqual Contract Reader is busy right now (the AI provider's rate limit was reached). "
             "Wait a minute and click Simplify again, or paste fewer pages. "
             + BEST_FIT_NOTE
         )
@@ -678,13 +678,13 @@ def explain_ai_error(exc: Exception) -> str:
         )
     if "401" in text or "invalid_api_key" in low or "incorrect api key" in low:
         if is_public_mode():
-            return "ClearClause is temporarily unavailable. Please try again later."
+            return "Mastqual Contract Reader is temporarily unavailable. Please try again later."
         return "The API key was rejected. Copy a fresh key from the provider dashboard and paste it again."
     if "model" in low and (
         "not found" in low or "not_found" in low or "does not exist" in low or "no longer available" in low
     ):
         if is_public_mode():
-            return "ClearClause is temporarily unavailable. Please try again later."
+            return "Mastqual Contract Reader is temporarily unavailable. Please try again later."
         return "That model name is not available on this key. Leave the default, or pick another model the provider lists."
     if "expecting" in low or "delimiter" in low or "json" in low:
         return (
@@ -949,7 +949,7 @@ def take_usage_slot() -> str:
             store.update(day=today, total=0, by_user={})
         if total_cap and store["total"] >= total_cap:
             return (
-                "Today's free ClearClause readings are used up. Please come back tomorrow, "
+                "Today's free readings are used up. Please come back tomorrow, "
                 "or write to saroj@mastqual.in for a walkthrough."
             )
         if per_user_cap and any(store["by_user"].get(i, 0) >= per_user_cap for i in ids):
@@ -973,8 +973,8 @@ def public_gate() -> bool:
     """Light gate for public visitors: an email and a not-legal-advice acknowledgement."""
     if st.session_state.get("gate_email"):
         return True
-    st.title("ClearClause")
-    st.markdown("A first read of a contract, in plain English. Built by Mastqual.")
+    st.title(APP_NAME)
+    st.markdown("A first read of a contract, in plain English. An AI tool built by Mastqual.")
     st.warning(DISCLAIMER)
     st.caption(
         "Your email is used only to apply a small daily limit so the free demo stays up. "
@@ -983,7 +983,7 @@ def public_gate() -> bool:
     )
     with st.form("gate"):
         email = st.text_input("Your email")
-        agree = st.checkbox("I understand ClearClause is not a lawyer and this is not legal advice.")
+        agree = st.checkbox("I understand this tool is not a lawyer and this is not legal advice.")
         go = st.form_submit_button("Start", type="primary")
     if go:
         if not EMAIL_RE.match(email.strip()):
@@ -1005,7 +1005,7 @@ def require_access() -> bool:
         return True
     if st.session_state.get("unlocked"):
         return True
-    st.title("ClearClause")
+    st.title(APP_NAME)
     st.caption("Private preview. Ask the person who sent you the link for the share password.")
     password = st.text_input("Share password", type="password")
     if st.button("Enter", type="primary"):
@@ -1037,7 +1037,7 @@ def main() -> None:
         return
     settings = get_settings()
 
-    st.title("ClearClause")
+    st.title(APP_NAME)
     st.markdown(
         "Paste a contract or upload a PDF. Get a **plain-English read**, "
         "plus the **vague phrases** and **pitfalls** a non-lawyer should notice."
@@ -1046,7 +1046,7 @@ def main() -> None:
     st.caption(
         "Privacy: the text in the preview below is sent to an AI provider "
         f"({PROVIDERS[settings['provider']]['label']}) to write your briefing. "
-        "ClearClause does not store your contract — there are no accounts and no history. "
+        "Mastqual Contract Reader does not store your contract — there are no accounts and no history. "
         + BEST_FIT_NOTE
     )
 
@@ -1127,7 +1127,7 @@ def main() -> None:
 
     st.subheader("Before anything is sent")
     st.caption(
-        "Masking runs on the ClearClause server before anything goes to the AI provider. "
+        "Masking runs on the Mastqual Contract Reader server before anything goes to the AI provider. "
         "The preview below is the exact text that will be sent if you click Simplify. "
         "Masking is imperfect — names, addresses, and unique facts can still identify someone, "
         "so add them to the box below."
@@ -1191,7 +1191,7 @@ def main() -> None:
             st.error("Paste text or upload a PDF first. Or click the sample button to see how a report looks.")
         elif len(text) > max_chars:
             st.error(
-                f"This text is {len(text):,} characters. ClearClause reads up to "
+                f"This text is {len(text):,} characters. Mastqual Contract Reader reads up to "
                 f"{max_chars:,} characters (about 15 pages). Paste the key sections for now. "
                 + BEST_FIT_NOTE
             )
